@@ -9,14 +9,14 @@ A native GTK4/libadwaita app for Ubuntu 26.04 (GNOME 50) that switches the whole
 ## Installation
 
 ```bash
-git clone https://github.com/grantdong1-maker/gameboost.git
+git clone https://github.com/Grant-1maker/gameboost.git
 cd gameboost
 install -Dm755 gameboost ~/.local/bin/gameboost
 ```
 
 Then launch it from the app menu or with `~/.local/bin/gameboost`.
 
-GameBoost expects the matching assets from the companion [`desktop-profiles`](https://github.com/grantdong1-maker/desktop-profiles) repo to be installed. See that repo's README for the full setup.
+GameBoost expects the matching assets from the companion [`desktop-profiles`](https://github.com/Grant-1maker/desktop-profiles) repo to be installed. See that repo's README for the full setup.
 
 ## What it changes
 
