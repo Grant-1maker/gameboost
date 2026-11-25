@@ -167,8 +167,9 @@ class GameBoostApp(Adw.Application):
                     except Exception:
                         pass
                     break
-            if rpm in ("?", "", "0"):
+            if rpm in ("?", "", "0") and mode == "1":
                 # OmenCtl exposes a target but no tachometer on some boards.
+                # The target is stale in Auto mode, so only show it when manual.
                 t = os.path.join(os.path.dirname(info["enable"]), "fan1_target")
                 if os.path.exists(t):
                     try:
