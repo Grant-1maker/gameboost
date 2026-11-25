@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+"""
+GameBoost — a native GTK4/libadwaita app that toggles system tweaks
+for a gaming session. All changes are reversible with one click.
+"""
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gtk, Adw, GLib
+import subprocess
+import os
+import ast
+import time
+
+APP_ID = "io.github.grant.GameBoost"
+SETTINGS = os.path.expanduser("~/.config/gameboost-state")
+
+
+def run(cmd, root=False):
+    try:
+        if root:
+            cmd = ["pkexec"] + cmd
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def gset(schema, key, value):
+    return run(["gsettings", "set", schema, key, value])
+
+
+class GameBoostApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID)
+        self.active = False
+        self.rows = {}
+
+    def do_activate(self):
+        win = Adw.ApplicationWindow(application=self)
+        win.set_title("GameBoost")
+        win.set_default_size(480, 620)
+
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        toolbar.add_top_bar(header)
+        win.set_content(toolbar)
+
+        # Banner
+        status = Adw.StatusPage()
+        status.set_title("GameBoost")
+        status.set_description("Optimize your system for gaming — one click on, one click off.")
+        status.set_icon_name("applications-games-symbolic")
+        # Use a clamp inside a scrolled window
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(420)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        box.set_margin_top(24)
+        box.set_margin_bottom(24)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        clamp.set_child(box)
+        scroll.set_child(clamp)
+        toolbar.set_content(scroll)
+
+        intro = Gtk.Label()
+        intro.set_markup(
+            "<b>Boost what matters:</b> CPU frequency, GPU shaders, animations, "
+            "notifications, and background activity.\n"
+            "Everything restores when you switch it off."
+        )
+        intro.set_wrap(True)
+        intro.set_xalign(0)
+        intro.set_css_classes(["dim-label"])
+        box.append(intro)
+
+        group = Adw.PreferencesGroup()
+        group.set_title("Optimizations")
+        box.append(group)
+
+        options = [
+            ("cpu", "CPU Performance Governor", "Lock all cores to maximum frequency", True),
+            ("power", "Performance Power Profile", "System-wide performance mode", True),
+            ("glass", "Disable Glass Shaders", "Turn off Liquid Glass to free the GPU", True),
+            ("animations", "Disable Animations", "Faster UI response, less compositing", False),
+            ("notifications", "Do Not Disturb", "Silence popups while you play", True),
+            ("gamemode", "Feral GameMode", "Optimize individual games automatically", True),
+            ("swappiness", "Reduce Swappiness", "Keep the game in RAM instead of swapping", False),
+        ]
+        for key, title, subtitle, default in options:
+            row = Adw.SwitchRow()
+            row.set_title(title)
+            row.set_subtitle(subtitle)
+            row.set_active(default)
+            self.rows[key] = row
+            group.add(row)
+
+        # ── Appearance presets ─────────────────────────────────────────
+        appearance = Adw.PreferencesGroup()
+        appearance.set_title("Appearance")
+        appearance.set_description("One-click looks for the whole desktop")
+        box.append(appearance)
+
+        def add_action(title, subtitle, label, callback):
+            row = Adw.ActionRow()
+            row.set_title(title)
+            row.set_subtitle(subtitle)
+            btn = Gtk.Button(label=label)
+            btn.set_valign(Gtk.Align.CENTER)
+            btn.set_css_classes(["flat"])
+            btn.connect("clicked", lambda *_: callback())
+            row.add_suffix(btn)
+            appearance.add(row)
+
+        def set_wall(path):
+            gset("org.gnome.desktop.background", "picture-uri", path)
+            gset("org.gnome.desktop.background", "picture-uri-dark", path)
+
+        def set_gtk_css(mac):
+            # The full MacTahoe stylesheet (rounded corners, traffic lights)
+            # only applies in macOS mode; other modes use the stock theme.
+            d = os.path.expanduser("~/.config/gtk-4.0")
+            if mac:
+                src = os.path.join(d, "gtk-macos.css")
+                if os.path.exists(src):
+                    with open(src) as f:
+                        data = f.read()
+                    with open(os.path.join(d, "gtk.css"), "w") as f:
+                        f.write(data)
+            else:
+                with open(os.path.join(d, "gtk.css"), "w") as f:
+                    f.write("/* stock theme, square corners */\n"
+                            "window.background.csd { border-radius: 0; }\n")
+
+        def glass_set(key, value):
+            schema = "org.gnome.shell.extensions.liquid-glass@thinkingcoding1231.gmail.com"
+            sdir = os.path.expanduser(
+                "~/.local/share/gnome-shell/extensions/"
+                "liquid-glass@thinkingcoding1231.gmail.com/schemas"
+            )
+            run(["gsettings", "--schemadir", sdir, "set", schema, key, value])
+
+        def ext(uuid, on):
+            code, out, _ = run(["gsettings", "get", "org.gnome.shell",
+                                "enabled-extensions"])
+            try:
+                items = ast.literal_eval(out) if code == 0 else []
+            except (ValueError, SyntaxError):
+                items = []
+            if on and uuid not in items:
+                items.append(uuid)
+            elif not on and uuid in items:
+                items = [i for i in items if i != uuid]
+            run(["gsettings", "set", "org.gnome.shell", "enabled-extensions",
+                 repr(items)])
+
+        GLASS_ON_KEYS = (
+            "enable-dock-glass", "enable-menu-glass", "enable-notification-glass",
+            "enable-quick-settings-glass", "enable-osd-glass", "enable-application-glass",
+            "enable-extra-menu-glass", "enable-keyboard-menu-glass",
+            "enable-vitals-menu-glass", "enable-launcher",
+        )
+
+        def glass_all(on):
+            for key in GLASS_ON_KEYS:
+                glass_set(key, "true" if on else "false")
+
+        def arc_set(key, value):
+            sdir = os.path.expanduser(
+                "~/.local/share/gnome-shell/extensions/arcmenu@arcmenu.com/schemas"
+            )
+            run(["gsettings", "--schemadir", sdir, "set",
+                 "org.gnome.shell.extensions.arcmenu", key, value])
+
+        def glass_css(hide_panel):
+            # Liquid Glass is also used as a CSS loader for the Ubuntu mode
+            # square-dock override (its stylesheet loads after the Yaru shell
+            # theme, unlike Ubuntu Dock's own system stylesheet).
+            path = os.path.expanduser(
+                "~/.local/share/gnome-shell/extensions/"
+                "liquid-glass@thinkingcoding1231.gmail.com/stylesheet.css"
+            )
+            with open(path) as f:
+                text = f.read()
+            for marker in ("/* WINDOWS_TOPBAR_HIDE */",
+                           "/* UBUNTU_DOCK_SQUARE */"):
+                idx = text.find(marker)
+                if idx >= 0:
+                    text = text[:idx].rstrip() + "\n"
+            text += (
+                "\n/* UBUNTU_DOCK_SQUARE */\n"
+                "#dashtodockContainer.left #dash { "
+                "padding-left: 0; padding-right: 0; margin: 0; }\n"
+                "#dashtodockContainer.left #dash .dash-background,\n"
+                "#dashtodockContainer.left.extended #dash .dash-background,\n"
+                "#dashtodockContainer.left.straight-corner #dash .dash-background,\n"
+                "#dashtodockContainer.straight-corner #dash .dash-background { "
+                "border-radius: 0; margin: 0; box-shadow: none; }\n"
+            )
+            if hide_panel:
+                text += ("\n/* WINDOWS_TOPBAR_HIDE */\n"
+                         "#panel { opacity: 0; visibility: hidden; "
+                         "height: 0; min-height: 0; }\n")
+            with open(path) as f:
+                before = f.read()
+            if before == text:
+                return  # no change, don't restart the extension
+            with open(path, "w") as f:
+                f.write(text)
+            ext("liquid-glass@thinkingcoding1231.gmail.com", False)
+            ext("liquid-glass@thinkingcoding1231.gmail.com", True)
+
+        def restore_panel():
+            # Dash to Panel can leave the shell's top panel hidden after it is
+            # disabled on Wayland. A GTK theme round-trip forces the shell to
+            # rebuild the panel without a logout.
+            theme = run(["gsettings", "get", "org.gnome.desktop.interface",
+                         "gtk-theme"])[1].strip().strip("'")
+            run(["gsettings", "set", "org.gnome.desktop.interface",
+                 "gtk-theme", "Yaru"])
+            time.sleep(1)
+            run(["gsettings", "set", "org.gnome.desktop.interface",
+                 "gtk-theme", theme])
+
+        def reapply_top_bar():
+            # A theme round-trip can leave Liquid Glass holding stale panel
+            # styles. Re-applying the bar style restores the glass pill.
+            sdir = os.path.expanduser(
+                "~/.local/share/gnome-shell/extensions/"
+                "liquid-glass@thinkingcoding1231.gmail.com/schemas")
+            schema = "org.gnome.shell.extensions.liquid-glass@thinkingcoding1231.gmail.com"
+            style = run(["gsettings", "--schemadir", sdir, "get", schema,
+                         "top-bar-style"])[1].strip().strip("'")
+            if style == "off":
+                return
+            run(["gsettings", "--schemadir", sdir, "set", schema,
+                 "top-bar-style", "off"])
+            time.sleep(1)
+            run(["gsettings", "--schemadir", sdir, "set", schema,
+                 "top-bar-style", style])
+
+        def clean_favorites():
+            fav = ast.literal_eval(run(["gsettings", "get", "org.gnome.shell",
+                                        "favorite-apps"])[1] or "[]")
+            fav = [f for f in fav if f not in
+                   ("windows-search.desktop", "windows-start.desktop",
+                    "microsoft-store.desktop")]
+            if "snap-store_snap-store.desktop" not in fav:
+                fav.append("snap-store_snap-store.desktop")
+            run(["gsettings", "set", "org.gnome.shell", "favorite-apps",
+                 repr(fav)])
+
+        def apply_profile(name):
+            self._profile = name
+            if name == "ubuntu":
+                # Fully stock Ubuntu: stock Ubuntu Dock on the left, no
+                # third-party visual extensions.
+                # Keep Liquid Glass loaded as a CSS loader (all glass effects
+                # off) so its stylesheet can force the Ubuntu Dock square.
+                glass_css(False)
+                ext("liquid-glass@thinkingcoding1231.gmail.com", True)
+                ext("arcmenu@arcmenu.com", False)
+                run(["gnome-extensions", "disable", "dash-to-panel@jderose9.github.com"])
+                run(["gnome-extensions", "disable", "dash-to-dock@micxgx.gmail.com"])
+                run(["gnome-extensions", "enable", "ubuntu-dock@ubuntu.com"])
+                restore_panel()
+                clean_favorites()
+                run(["gsettings", "reset-recursively",
+                     "org.gnome.shell.extensions.dash-to-dock"])
+                gset("org.gnome.shell.extensions.dash-to-dock",
+                     "dock-position", "LEFT")
+                gset("org.gnome.shell.extensions.dash-to-dock",
+                     "force-straight-corner", "true")
+                gset("org.gnome.shell.extensions.dash-to-dock",
+                     "extend-height", "true")
+                gset("org.gnome.shell.extensions.dash-to-dock",
+                     "dock-fixed", "true")
+                gset("org.gnome.shell.extensions.dash-to-dock",
+                     "autohide", "false")
+                gset("org.gnome.shell.extensions.dash-to-dock",
+                     "intellihide", "false")
+                run(["gsettings", "reset", "org.gnome.desktop.interface",
+                     "cursor-theme"])
+                glass_all(False)
+                set_gtk_css(False)
+                gset("org.gnome.desktop.interface", "color-scheme", "prefer-dark")
+                gset("org.gnome.desktop.interface", "gtk-theme", "Yaru-dark")
+                gset("org.gnome.desktop.interface", "icon-theme", "Yaru")
+                gset("org.gnome.desktop.interface", "accent-color", "orange")
+                set_wall("file:///usr/share/backgrounds/Resolute_Raccoon_Wallpaper_Light_3840x2160.png")
+                glass_set("top-bar-style", "off")
+
+            elif name == "windows":
+                # Windows-like taskbar: full-width bottom bar, ArcMenu logo in
+                # the middle, search in the menu, no glass, no top bar.
+                # Keep Liquid Glass loaded (for the top-bar-hiding CSS) but
+                # visually off; Dash to Dock as the square grey taskbar.
+                glass_all(False)
+                glass_css(True)
+                set_gtk_css(False)
+                ext("liquid-glass@thinkingcoding1231.gmail.com", True)
+                run(["gnome-extensions", "disable", "ubuntu-dock@ubuntu.com"])
+                run(["gnome-extensions", "disable", "dash-to-dock@micxgx.gmail.com"])
+                run(["gnome-extensions", "enable", "dash-to-panel@jderose9.github.com"])
+                ext("arcmenu@arcmenu.com", True)
+                gset("org.gnome.desktop.interface", "color-scheme", "prefer-dark")
+                gset("org.gnome.desktop.interface", "gtk-theme", "Yaru-dark")
+                gset("org.gnome.desktop.interface", "icon-theme", "Win11-dark")
+                gset("org.gnome.desktop.interface", "accent-color", "blue")
+                set_wall("file:///home/grant/.local/share/backgrounds/windows-bloom.jpg")
+                # Dash to Panel settings are left untouched — the panel
+                # layout/thickness/colour are user-tuned in its preferences
+                # and persist across profile switches.
+                # Real Search launcher on the taskbar (FocusSearch via D-Bus)
+                fav = ast.literal_eval(run(["gsettings", "get", "org.gnome.shell",
+                                            "favorite-apps"])[1] or "[]")
+                fav = [f for f in fav if f not in
+                       ("windows-search.desktop", "windows-start.desktop",
+                        "microsoft-store.desktop")]
+                fav.insert(0, "windows-search.desktop")
+                fav.insert(len(fav) // 2, "windows-start.desktop")
+                # App Centre becomes the Microsoft Store in Windows mode.
+                fav = ["microsoft-store.desktop" if f ==
+                       "snap-store_snap-store.desktop" else f for f in fav]
+                run(["gsettings", "set", "org.gnome.shell", "favorite-apps",
+                     repr(fav)])
+                arc_set("force-menu-location", "BottomCentered")
+                arc_set("menu-button-icon",
+                        os.path.expanduser("~/.local/share/icons/windows-logo.svg"))
+                arc_set("menu-button-appearance", "Icon")
+                arc_set("menu-button-icon-size", "18")
+                arc_set("search-hidden", "false")
+                arc_set("runner-position", "Centered")
+                glass_set("top-bar-style", "off")
+
+            elif name == "macos":
+                run(["gnome-extensions", "disable", "dash-to-panel@jderose9.github.com"])
+                run(["gnome-extensions", "disable", "ubuntu-dock@ubuntu.com"])
+                run(["gnome-extensions", "enable", "dash-to-dock@micxgx.gmail.com"])
+                restore_panel()
+                ext("liquid-glass@thinkingcoding1231.gmail.com", True)
+                ext("arcmenu@arcmenu.com", True)
+                clean_favorites()
+                glass_css(False)
+                glass_all(True)
+                set_gtk_css(True)
+                gset("org.gnome.desktop.interface", "color-scheme", "prefer-dark")
+                gset("org.gnome.desktop.interface", "gtk-theme", "MacTahoe-Dark")
+                gset("org.gnome.desktop.interface", "icon-theme", "Yaru-blue-dark")
+                gset("org.gnome.desktop.interface", "accent-color", "slate")
+                set_wall("file:///home/grant/.local/share/backgrounds/MacTahoe-night.jpeg")
+                glass_set("top-bar-style", "pill")
+                glass_set("top-bar-padding-top", "4")
+                glass_set("top-bar-padding-bottom", "4")
+                glass_set("dock-tint-color", "#1e1e1e")
+                glass_set("dock-tint-strength", "0.22")
+                # Clean dock defaults under Liquid Glass (no grey icon plates),
+                # smaller icons, always-visible floating pill.
+                run(["gsettings", "reset-recursively",
+                     "org.gnome.shell.extensions.dash-to-dock"])
+                glass_set("enable-dock-glass", "true")
+                gset("org.gnome.shell.extensions.dash-to-dock", "dock-position", "BOTTOM")
+                gset("org.gnome.shell.extensions.dash-to-dock", "dash-max-icon-size", "40")
+                gset("org.gnome.shell.extensions.dash-to-dock", "show-mounts", "false")
+                gset("org.gnome.shell.extensions.dash-to-dock", "show-trash", "false")
+                gset("org.gnome.shell.extensions.dash-to-dock", "extend-height", "false")
+                gset("org.gnome.shell.extensions.dash-to-dock", "autohide", "false")
+                gset("org.gnome.shell.extensions.dash-to-dock", "intellihide", "false")
+                gset("org.gnome.shell.extensions.dash-to-dock", "dock-fixed", "true")
+                gset("org.gnome.shell.extensions.dash-to-dock", "require-pressure-to-show", "false")
+                arc_set("force-menu-location", "TopCentered")
+                arc_set("menu-button-icon",
+                        "resource:///org/gnome/shell/extensions/arcmenu/icons/"
+                        "scalable/actions/icon-arcmenu-logo-symbolic.svg")
+                reapply_top_bar()
+
+        add_action("Ubuntu", "Stock Yaru theme and default wallpaper", "Apply",
+                   lambda: apply_profile("ubuntu"))
+        add_action("Windows", "Dark Yaru, blue accent, centred glass bar", "Apply",
+                   lambda: apply_profile("windows"))
+        add_action("macOS", "MacTahoe dark, blue folders, slate accent", "Apply",
+                   lambda: apply_profile("macos"))
+        add_action("Tahoe wallpaper", "Time-of-day dynamic wallpaper", "Apply",
+                   lambda: set_wall("file:///usr/share/backgrounds/Tahoe/tahoe-timed.xml"))
+        add_action("Blue wallpaper", "Static blue glass wallpaper", "Apply",
+                   lambda: set_wall("file:///home/grant/.local/share/backgrounds/liquid-glass-blue.jpg"))
+
+        # Big toggle button
+        self.toggle_btn = Gtk.Button()
+        self.toggle_btn.set_label("Enable Game Mode")
+        self.toggle_btn.set_css_classes(["suggested-action", "pill"])
+        self.toggle_btn.set_margin_top(12)
+        self.toggle_btn.connect("clicked", self.on_toggle)
+        box.append(self.toggle_btn)
+
+        self.status_label = Gtk.Label()
+        self.status_label.set_label("Status: Off — system running normally")
+        self.status_label.set_css_classes(["dim-label"])
+        box.append(self.status_label)
+
+        win.present()
+
+    def on_toggle(self, btn):
+        if not self.active:
+            self.apply_all()
+            self.active = True
+            btn.set_label("Disable Game Mode")
+            btn.remove_css_class("suggested-action")
+            btn.add_css_class("destructive-action")
+            self.status_label.set_label("Status: ON — optimizations active")
+        else:
+            self.restore_all()
+            self.active = False
+            btn.set_label("Enable Game Mode")
+            btn.remove_css_class("destructive-action")
+            btn.add_css_class("suggested-action")
+            self.status_label.set_label("Status: Off — system restored")
+
+    def apply_all(self):
+        S = "org.gnome.shell.extensions.liquid-glass@thinkingcoding1231.gmail.com"
+        SDIR = os.path.expanduser("~/.local/share/gnome-shell/extensions/liquid-glass@thinkingcoding1231.gmail.com/schemas")
+        if self.rows["cpu"].get_active():
+            run(["cpupower", "frequency-set", "-g", "performance"], root=True)
+        if self.rows["power"].get_active():
+            run(["powerprofilesctl", "set", "performance"])
+        if self.rows["glass"].get_active():
+            for k in ("enable-dock-glass", "enable-menu-glass", "enable-notification-glass",
+                      "enable-quick-settings-glass", "enable-osd-glass", "enable-application-glass"):
+                run(["gsettings", "--schemadir", SDIR, "set", S, k, "false"])
+        if self.rows["animations"].get_active():
+            gset("org.gnome.desktop.interface", "enable-animations", "false")
+        if self.rows["notifications"].get_active():
+            gset("org.gnome.desktop.notifications", "show-banners", "false")
+        if self.rows["gamemode"].get_active():
+            # Just ensure the daemon is available; games opt in with `gamemoderun`
+            pass
+        if self.rows["swappiness"].get_active():
+            run(["sysctl", "vm.swappiness=10"], root=True)
+
+    def restore_all(self):
+        S = "org.gnome.shell.extensions.liquid-glass@thinkingcoding1231.gmail.com"
+        SDIR = os.path.expanduser("~/.local/share/gnome-shell/extensions/liquid-glass@thinkingcoding1231.gmail.com/schemas")
+        for k in ("enable-dock-glass", "enable-menu-glass", "enable-notification-glass",
+                  "enable-quick-settings-glass", "enable-osd-glass", "enable-application-glass"):
+            run(["gsettings", "--schemadir", SDIR, "set", S, k, "true"])
+        gset("org.gnome.desktop.interface", "enable-animations", "true")
+        gset("org.gnome.desktop.notifications", "show-banners", "true")
+        run(["cpupower", "frequency-set", "-g", "powersave"], root=True)
+        run(["powerprofilesctl", "set", "balanced"])
+        run(["sysctl", "vm.swappiness=60"], root=True)
+
+
+app = GameBoostApp()
+app.run(None)
