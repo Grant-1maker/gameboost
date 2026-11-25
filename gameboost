@@ -167,6 +167,14 @@ class GameBoostApp(Adw.Application):
                     except Exception:
                         pass
                     break
+            if rpm in ("?", "", "0"):
+                # OmenCtl exposes a target but no tachometer on some boards.
+                t = os.path.join(os.path.dirname(info["enable"]), "fan1_target")
+                if os.path.exists(t):
+                    try:
+                        rpm = open(t).read().strip() + " target"
+                    except Exception:
+                        pass
             return "%s · %s RPM" % (names.get(mode, "Mode " + mode), rpm)
 
         fan_row = Adw.ActionRow()
