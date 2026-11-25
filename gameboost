@@ -11,6 +11,7 @@ import subprocess
 import os
 import ast
 import time
+import glob
 
 APP_ID = "io.github.grant.GameBoost"
 SETTINGS = os.path.expanduser("~/.config/gameboost-state")
@@ -96,6 +97,125 @@ class GameBoostApp(Adw.Application):
             row.set_active(default)
             self.rows[key] = row
             group.add(row)
+
+        # ── Fan control ────────────────────────────────────────────────
+        fan_group = Adw.PreferencesGroup()
+        fan_group.set_title("Fan control")
+        fan_group.set_description(
+            "HP WMI interface — needs administrator approval"
+        )
+        box.append(fan_group)
+
+        def fan_paths():
+            for p in glob.glob("/sys/class/hwmon/hwmon*"):
+                try:
+                    if open(os.path.join(p, "name")).read().strip() == "hp":
+                        return {
+                            "enable": os.path.join(p, "pwm1_enable"),
+                            "pwm": os.path.join(p, "pwm1"),
+                            "target": os.path.join(p, "fan1_target"),
+                        }
+                except Exception:
+                    pass
+            return None
+
+        def fan_write(path, value):
+            # sysfs is root-owned; pkexec gives a GUI auth prompt.
+            return run(["sh", "-c", "printf '%s' '%s' > '%s'" % (value, value, path)],
+                       root=True)
+
+        def fan_set(mode, value=None):
+            info = fan_paths()
+            if not info or not os.path.exists(info["enable"]):
+                return "No HP fan interface found"
+            if mode == "auto":
+                rc, _, err = fan_write(info["enable"], 2)
+                return "Auto" if rc == 0 else "Failed: " + err
+            if mode == "max":
+                rc, _, err = fan_write(info["enable"], 0)
+                return "Max" if rc == 0 else "Failed: " + err
+            if mode == "manual":
+                target = None
+                if info["pwm"] and os.path.exists(info["pwm"]):
+                    target = info["pwm"]
+                elif info["target"] and os.path.exists(info["target"]):
+                    target = info["target"]
+                if not target:
+                    return "Manual speed not supported by this driver"
+                rc, _, err = fan_write(info["enable"], 1)
+                if rc != 0:
+                    return "Failed: " + err
+                rc, _, err = fan_write(target, value)
+                return "Manual %s" % value if rc == 0 else "Failed: " + err
+            return "Unknown mode"
+
+        def fan_status_text():
+            info = fan_paths()
+            if not info:
+                return "No HP fan interface found"
+            try:
+                mode = open(info["enable"]).read().strip()
+            except Exception:
+                mode = "?"
+            names = {"0": "Max", "1": "Manual", "2": "Auto"}
+            rpm = "?"
+            for p in glob.glob("/sys/class/hwmon/hwmon*"):
+                f = os.path.join(p, "fan1_input")
+                if os.path.exists(f):
+                    try:
+                        rpm = open(f).read().strip()
+                    except Exception:
+                        pass
+                    break
+            return "%s · %s RPM" % (names.get(mode, "Mode " + mode), rpm)
+
+        fan_row = Adw.ActionRow()
+        fan_row.set_title("Current state")
+        fan_row.set_subtitle(fan_status_text())
+        fan_group.add(fan_row)
+
+        fan_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        fan_buttons.set_valign(Gtk.Align.CENTER)
+        for label, mode in (("Auto", "auto"), ("Max", "max")):
+            b = Gtk.Button(label=label)
+            b.set_css_classes(["flat"])
+            b.connect("clicked", lambda *_ , m=mode: (
+                fan_set(m), fan_row.set_subtitle(fan_status_text())))
+            fan_buttons.append(b)
+        fan_action = Adw.ActionRow()
+        fan_action.set_title("Preset")
+        fan_action.set_subtitle("Auto = BIOS control · Max = full speed")
+        fan_action.add_suffix(fan_buttons)
+        fan_group.add(fan_action)
+
+        info = fan_paths()
+        manual_supported = bool(
+            info and (os.path.exists(info["pwm"]) or
+                      os.path.exists(info["target"])))
+        if manual_supported:
+            adj = Gtk.Adjustment(value=180, lower=0, upper=255,
+                                 step_increment=1, page_increment=10)
+            scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL,
+                              adjustment=adj)
+            scale.set_hexpand(True)
+            scale.set_valign(Gtk.Align.CENTER)
+            scale.set_digits(0)
+            apply = Gtk.Button(label="Apply")
+            apply.set_css_classes(["flat"])
+            apply.connect("clicked", lambda *_: (
+                fan_set("manual", int(adj.get_value())),
+                fan_row.set_subtitle(fan_status_text())))
+            row = Adw.ActionRow()
+            row.set_title("Manual speed")
+            row.set_subtitle("0–255 PWM duty")
+            row.add_suffix(scale)
+            row.add_suffix(apply)
+            fan_group.add(row)
+        else:
+            note = Adw.ActionRow()
+            note.set_title("Manual speed")
+            note.set_subtitle("Not exposed — needs a custom hp-wmi driver")
+            fan_group.add(note)
 
         # ── Appearance presets ─────────────────────────────────────────
         appearance = Adw.PreferencesGroup()

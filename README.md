@@ -6,6 +6,8 @@ A native GTK4/libadwaita app for Ubuntu 26.04 (GNOME 50) that switches the whole
 - **Windows** — grey full-width bottom taskbar, no top bar, Windows-logo Start, Microsoft Store icon, Win11 icons
 - **Ubuntu** — stock Ubuntu Dock on the left, Yaru-dark, orange accent
 
+It also has a **Fan control** section that reads the HP WMI hwmon interface and lets you switch between Auto (BIOS-managed) and Max, with a manual PWM slider if your driver exposes `pwm1`/`fan1_target`. Writes go through `pkexec`.
+
 ## Installation
 
 ```bash
